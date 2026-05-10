@@ -260,3 +260,25 @@
 &vec {
 	status = "disabled";
 };
+
+&gpio {
+    led_pins: led_pins {
+        brcm,pins = <10>;        // GPIO10
+        brcm,function = <1>;     // 1 = GPIO
+        brcm,pull = <0>;
+    };
+};
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+        pinctrl-names = "default";
+        pinctrl-0 = <&led_pins>;
+
+		led_gpio10 {
+			label = "gpio10-led";
+        	gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
+        	default-state = "on";			
+		};
+	};
+};
