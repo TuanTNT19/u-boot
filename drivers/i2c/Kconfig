@@ -171,6 +171,12 @@ config SYS_I2C_AT91
 	  i2c-gpio driver unless your system can cope with this limitation.
 	  Binding info: doc/device-tree-bindings/i2c/i2c-at91.txt
 
+config SYS_I2C_BCM2835
+	bool "Broadcom 2835 I2C driver"
+	depends on DM_I2C
+	help
+	  Broadcom 2835 I2C driver.
+
 config SYS_I2C_IPROC
 	bool "Broadcom I2C driver"
 	depends on DM_I2C

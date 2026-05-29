@@ -3440,6 +3440,16 @@ i2c_csi_dsi0: &i2c0 {
     };
 };
 
+&i2c1 {
+ status = "okay";
+
+ ssd1306:ssd1306@3c {
+  compatible = "tnt19,ssd1306";
+  reg = <0x3c>;
+  status = "okay";
+ };
+};
+
 / {
  leds {
   compatible = "gpio-leds";
@@ -3447,7 +3457,7 @@ i2c_csi_dsi0: &i2c0 {
         pinctrl-0 = <&led_pins>;
 
   led_gpio10 {
-   label = "led10_gpioxxxub";
+   label = "led10_gpio_ub";
          gpios = <&gpio 10 0>;
          default-state = "on";
   };
