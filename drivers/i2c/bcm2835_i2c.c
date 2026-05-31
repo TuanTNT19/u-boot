@@ -332,6 +332,7 @@ static int bcm2835_i2c_probe(struct udevice *bus)
 			   BCM2835_I2C_S_ERR |
 			   BCM2835_I2C_S_DONE);
 	
+	printf ("bcm2835_i2c: probe OK\n");
 	return 0;
 }
 

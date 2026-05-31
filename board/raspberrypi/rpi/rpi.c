@@ -474,6 +474,9 @@ static void set_serial_number(void)
 
 int misc_init_r(void)
 {
+	struct udevice *dev;
+	int ret;
+
 	set_fdt_addr();
 	set_fdtfile();
 	set_usbethaddr();
@@ -481,6 +484,16 @@ int misc_init_r(void)
 	set_board_info();
 #endif
 	set_serial_number();
+
+    // probe driver bcm2835_i2c
+	ret = uclass_get_device_by_seq(UCLASS_I2C, 1, &dev);
+	if (ret)
+		printf("Failed to probe bcm2835_i2c : %d\n", ret);
+
+	// probe ssd1306 driver
+	ret = uclass_get_device_by_name(UCLASS_MISC, "ssd1306", &dev);
+	if (ret)
+		printf("Failed to probe ssd1306: %d\n", ret);
 
 	return 0;
 }
