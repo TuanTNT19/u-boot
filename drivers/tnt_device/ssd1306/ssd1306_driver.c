@@ -6,7 +6,7 @@
 #include "ssd1306_lib.h"
 
 struct ssd1306_priv {
-	ssd1306_i2c_module ssd;
+	struct ssd1306_i2c_module ssd;
 };
 static const struct udevice_id ssd1306_ids[] = {
 	{.compatible = "tnt19,ssd1306"},

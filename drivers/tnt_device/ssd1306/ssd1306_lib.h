@@ -8,9 +8,13 @@
 #include <linux/types.h>
 #include <stdbool.h>
 
+
+#define SSD1306_MAX_SEG 128
+#define SSD1306_MAX_LINE 7
+#define SSD1306_DEF_FONT_SIZE 5
 #define msleep(a) udelay(a * 1000)
 
-const unsigned char ssd1306_font[][SSD1306_DEF_FONT_SIZE] = {
+static const unsigned char ssd1306_font[][SSD1306_DEF_FONT_SIZE] = {
     {0x00, 0x00, 0x00, 0x00, 0x00},   // space
     {0x00, 0x00, 0x2f, 0x00, 0x00},   // !
     {0x00, 0x07, 0x00, 0x07, 0x00},   // "
@@ -107,10 +111,6 @@ const unsigned char ssd1306_font[][SSD1306_DEF_FONT_SIZE] = {
     {0x00, 0x82, 0x7C, 0x10, 0x00},   // }
     {0x00, 0x06, 0x09, 0x09, 0x06}    // ~ (Degrees)
 };
-
-#define SSD1306_MAX_SEG 128
-#define SSD1306_MAX_LINE 7
-#define SSD1306_DEF_FONT_SIZE 5
 
 struct ssd1306_i2c_module {
 	struct udevice *dev;
