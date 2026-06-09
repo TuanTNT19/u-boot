@@ -1,9 +1,18 @@
 #include "ssd1306_lib.h"
 
 
-int ssd1306_i2c_send(struct ssd1306_i2c_module *module , char *buff, int len)
+int ssd1306_i2c_send(struct ssd1306_i2c_module *module,
+                     char *buff,
+                     int len)
 {
-    return dm_i2c_write(module->dev, 0 , buff, len);
+    struct i2c_msg msg;
+
+    msg.addr  = dev_read_addr(module->dev);
+    msg.flags = 0;
+    msg.len   = len;
+    msg.buf   = buff;
+
+    return dm_i2c_xfer(module->dev, &msg, 1);
 }
 
 void ssd1306_write(struct ssd1306_i2c_module *module, bool check, char data)
@@ -70,7 +79,7 @@ void ssd1306_print_char(struct ssd1306_i2c_module *module, unsigned char c)
 		ssd1306_write(module, false, 0x00); 
 		module->cursor_position++;
    
-}
+	}
 }
 
 void ssd1306_print_string(struct ssd1306_i2c_module *module, unsigned char *str){
@@ -130,16 +139,6 @@ int ssd1306_display_init(struct ssd1306_i2c_module *module)
     ssd1306_write(module, true, 0x8D); //  Charge pump
     ssd1306_write(module, true, 0x14); // Enable charge dump during display on
 	ssd1306_write(module, true, 0xAF); // Display ON in normal mode
-	// ssd1306_set_cursor(module, 0, 0);
-	// ssd1306_print_string(module, "WELCOME TO TUANTNT19\n");
-	// ssd1306_set_cursor(module, 1, 0);
-	// ssd1306_print_string(module, "Loading ");
-	// int i;
-	// for (i = 0; i<3; i++)
-	// {
-	// 	ssd1306_print_string(module, ".");
-	// 	msleep(500);
-	// }
 	ssd1306_clear_full(module);
 
 	return 0;

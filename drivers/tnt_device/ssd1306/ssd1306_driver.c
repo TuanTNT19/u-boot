@@ -24,15 +24,18 @@ static int ssd1306_probe(struct udevice *dev)
 
 	ssd1306_display_init(&priv->ssd);
 	ssd1306_set_cursor(&priv->ssd, 3, 2);
-	ssd1306_print_string(&priv->ssd, "Welcome to SSD1306");
-	printf("Probe ssd 1306 function done \n");
+	ssd1306_set_cursor(&priv->ssd, 2, 20);
+	ssd1306_print_string(&priv->ssd, "RASP PI4");
+
+	ssd1306_set_cursor(&priv->ssd, 5, 18);
+	ssd1306_print_string(&priv->ssd, "Booting...");
 
 	return 0;
 }
 
-U_BOOT_DRIVER(ssd1036) = {
+U_BOOT_DRIVER(ssd1306) = {
 	.name       = "ssd1306",
-	.id         = UCLASS_MISC,
+	.id         = UCLASS_I2C_GENERIC,
 	.of_match   = ssd1306_ids,
 	.probe      = ssd1306_probe,
 	.priv_auto = sizeof(struct ssd1306_priv),

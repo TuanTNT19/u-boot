@@ -491,7 +491,7 @@ int misc_init_r(void)
 		printf("Failed to probe bcm2835_i2c : %d\n", ret);
 
 	// probe ssd1306 driver
-	ret = uclass_get_device_by_name(UCLASS_MISC, "ssd1306", &dev);
+	ret = uclass_get_device_by_name(UCLASS_I2C_GENERIC, "ssd1306@3c", &dev);
 	if (ret)
 		printf("Failed to probe ssd1306: %d\n", ret);
 
