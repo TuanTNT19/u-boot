@@ -144,6 +144,8 @@ source "drivers/thermal/Kconfig"
 
 source "drivers/timer/Kconfig"
 
+source "drivers/tnt_device/Kconfig"
+
 source "drivers/tpm/Kconfig"
 
 source "drivers/usb/Kconfig"
