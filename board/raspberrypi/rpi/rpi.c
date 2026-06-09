@@ -474,6 +474,9 @@ static void set_serial_number(void)
 
 int misc_init_r(void)
 {
+	struct udevice *dev;
+	int ret;
+
 	set_fdt_addr();
 	set_fdtfile();
 	set_usbethaddr();
@@ -481,6 +484,10 @@ int misc_init_r(void)
 	set_board_info();
 #endif
 	set_serial_number();
+
+	ret = uclass_get_device_by_seq(UCLASS_I2C, 1, &dev);
+	if (ret)
+		printf("Failed to probe bcm2835_i2c : %d\n", ret);	
 
 	return 0;
 }
