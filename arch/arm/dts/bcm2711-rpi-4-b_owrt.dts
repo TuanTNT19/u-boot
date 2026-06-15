@@ -54,6 +54,11 @@
 		enable-active-high;
 		gpio = <&expgpio 6 GPIO_ACTIVE_HIGH>;
 	};
+
+	aliases {
+		mmc0 = &emmc2;
+		mmc1 = &sdhci;
+	};
 };
 
 &ddc0 {
