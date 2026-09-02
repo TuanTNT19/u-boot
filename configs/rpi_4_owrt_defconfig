@@ -14,7 +14,7 @@ CONFIG_EFI_RUNTIME_UPDATE_CAPSULE=y
 CONFIG_EFI_CAPSULE_FIRMWARE_RAW=y
 # CONFIG_BOOTSTD_DEFAULTS is not set> # Use custom bootargs/bootcmd
 CONFIG_USE_BOOTARGS=y
-CONFIG_BOOTARGS="console=tty1 console=serial0,115200 root=PARTUUID=468bf111-02 rootfstype=squashfs,ext4 rootwait"
+CONFIG_BOOTARGS="console=tty1 console=serial0,115200 root=PARTUUID=3205d7aa-02 rootfstype=squashfs,ext4 rootwait"
 CONFIG_USE_BOOTCOMMAND=y
 CONFIG_BOOTCOMMAND="fatload mmc 0:1 ${kernel_addr_r} kernel8.img; fatload mmc 0:1 ${fdt_addr_r} bcm2711-rpi-4-b.dtb; booti ${kernel_addr_r} - ${fdt_addr_r}"
 CONFIG_OF_BOARD_SETUP=y
@@ -75,4 +75,10 @@ CONFIG_VIDEO_BCM2835=y
 CONFIG_CONSOLE_SCROLL_LINES=10
 CONFIG_PHYS_TO_BUS=y
 # CONFIG_HEXDUMP is not set
+CONFIG_DM_I2C=y
+CONFIG_DM_GPIO=y
+CONFIG_BCM2835_GPIO=y
+CONFIG_OF_CONTROL=y
+CONFIG_CMD_I2C=y
+CONFIG_SYS_I2C_BCM2835=y
 
