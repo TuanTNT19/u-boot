@@ -266,3 +266,12 @@
 	status = "disabled";
 };
 
+&i2c1 {
+	status = "okay";
+	ssd1306:ssd1306@3c {
+		compatible = "tnt19,ssd1306";
+	reg = <0x3c>;
+	status = "okay";
+	};
+};
+

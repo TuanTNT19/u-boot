@@ -488,7 +488,11 @@ int misc_init_r(void)
 	ret = uclass_get_device_by_seq(UCLASS_I2C, 1, &dev);
 	if (ret)
 		printf("Failed to probe bcm2835_i2c : %d\n", ret);	
-		
+
+	ret = uclass_get_device_by_name(UCLASS_I2C_GENERIC, "ssd1306@3c", &dev);
+	if (ret)
+		printf("Failed to probe ssd1306: %d\n", ret);
+
 	return 0;
 }
 

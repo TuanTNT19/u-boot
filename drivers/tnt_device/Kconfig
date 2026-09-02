@@ -1,0 +1,5 @@
+menu "tnt_driver"
+
+source "drivers/tnt_device/ssd1306/Kconfig"
+
+endmenu

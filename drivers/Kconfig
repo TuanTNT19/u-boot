@@ -146,6 +146,8 @@ source "drivers/timer/Kconfig"
 
 source "drivers/tpm/Kconfig"
 
+source "drivers/tnt_device/Kconfig"
+
 source "drivers/usb/Kconfig"
 
 source "drivers/ufs/Kconfig"

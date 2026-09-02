@@ -1,0 +1,5 @@
+config SSD1306
+	bool "SSD1306 Driver"
+	depends on SYS_I2C_BCM2835
+	help
+	  Enable SSD1306 screen driver in Uboot
