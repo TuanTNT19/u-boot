@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DEFCONFIG="configs/rpi_4_owrt_defconfig"
+PI4_OWRT_DEFCONFIG="configs/rpi_4_owrt_defconfig"
 
 help()
 {
@@ -16,6 +16,7 @@ help()
     echo "  before building."
     echo
     echo "Examples:"
+    echo "  With pi4 owrt:"
     echo "  $0 rpi_4_owrt_defconfig"
     echo "      Build U-Boot without changing PARTUUID."
     echo
@@ -23,7 +24,9 @@ help()
     echo "      Set PARTUUID=3205d7aa and build U-Boot."
     echo
     echo "  $0 set-partuuid 3205d7aa"
-    echo "      Only update PARTUUID in ${DEFCONFIG}."
+    echo "      Only update PARTUUID in ${PI4_OWRT_DEFCONFIG}."
+    echo "  With other device:"
+    echo "  $0 <board>s_defconfig"
 }
 
 set_partuuid()
@@ -40,7 +43,7 @@ set_partuuid()
 
     sed -i \
         "s#^CONFIG_BOOTARGS=.*#CONFIG_BOOTARGS=\"console=tty1 console=serial0,115200 root=PARTUUID=${PARTUUID}-02 rootfstype=squashfs,ext4 rootwait\"#" \
-        "${DEFCONFIG}"
+        "${PI4_OWRT_DEFCONFIG}"
 }
 
 build()
