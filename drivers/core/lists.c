@@ -196,8 +196,9 @@ static int driver_check_compatible(const struct udevice_id *of_match,
 	return -ENOENT;
 }
 
-int lists_bind_fdt(struct udevice *parent, ofnode node, struct udevice **devp,
-		   struct driver *drv, bool pre_reloc_only)
+int lists_bind_fdt(struct udevice *parent, ofnode node,
+		   struct udevice **devp, struct driver *drv,
+		   bool pre_reloc_only)
 {
 	struct driver *driver = ll_entry_start(struct driver, driver);
 	const int n_ents = ll_entry_count(struct driver, driver);
@@ -210,10 +211,12 @@ int lists_bind_fdt(struct udevice *parent, ofnode node, struct udevice **devp,
 
 	if (devp)
 		*devp = NULL;
+
 	name = ofnode_get_name(node);
 	log_debug("bind node %s\n", name);
 
 	compat_list = ofnode_get_property(node, "compatible", &compat_length);
+
 	if (!compat_list) {
 		if (compat_length == -FDT_ERR_NOTFOUND) {
 			log_debug("Device '%s' has no compatible string\n",

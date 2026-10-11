@@ -98,9 +98,6 @@
 	status = "okay";
 };
 
-&genet {
-	status = "okay";
-};
 
 &i2c0_1 {
 	rtc@51 {

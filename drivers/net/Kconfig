@@ -159,11 +159,11 @@ config BCM6368_ETH
 	help
 	  This driver supports the BCM6368 Ethernet MAC.
 
-config BCMGENET
-	bool "BCMGENET V5 support"
+config BCMGENET_TNT
+	bool "BCMGENET V5 support TuanTNT19"
 	select PHYLIB
 	help
-	  This driver supports the BCMGENET Ethernet MAC.
+	  This driver supports the BCMGENET Ethernet MAC by TuanTNT19.
 
 source "drivers/net/bnxt/Kconfig"
 

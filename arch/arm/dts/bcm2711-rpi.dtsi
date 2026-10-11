@@ -12,7 +12,6 @@
 
 	aliases {
 		emmc2bus = &emmc2bus;
-		ethernet0 = &genet;
 		pcie0 = &pcie0;
 		blconfig = &blconfig;
 	};

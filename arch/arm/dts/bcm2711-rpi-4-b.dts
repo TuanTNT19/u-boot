@@ -203,19 +203,6 @@
 	status = "okay";
 };
 
-&genet {
-	phy-handle = <&phy1>;
-	phy-mode = "rgmii-rxid";
-	status = "okay";
-};
-
-&genet_mdio {
-	phy1: ethernet-phy@1 {
-		/* No PHY interrupt */
-		reg = <0x1>;
-	};
-};
-
 &pcie0 {
 	pci@0,0 {
 		device_type = "pci";

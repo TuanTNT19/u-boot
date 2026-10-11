@@ -1,41 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * Copyright (C) 2019 Amit Singh Tomar <amittomer25@gmail.com>
- *
- * Driver for Broadcom GENETv5 Ethernet controller (as found on the RPi4)
- * This driver is based on the Linux driver:
- *      drivers/net/ethernet/broadcom/genet/bcmgenet.c
- *      which is: Copyright (c) 2014-2017 Broadcom
- *
- * The hardware supports multiple queues (16 priority queues and one
- * default queue), both for RX and TX. There are 256 DMA descriptors (both
- * for TX and RX), and they live in MMIO registers. The hardware allows
- * assigning descriptor ranges to queues, but we choose the most simple setup:
- * All 256 descriptors are assigned to the default queue (#16).
- * Also the Linux driver supports multiple generations of the MAC, whereas
- * we only support v5, as used in the Raspberry Pi 4.
+ * Copyright (C) 2018 Tuan Truong Nho <tuantnt08@gmail.com>
  */
 
-#include <log.h>
-#include <asm/cache.h>
-#include <asm/io.h>
-#include <clk.h>
-#include <cpu_func.h>
 #include <dm.h>
-#include <fdt_support.h>
-#include <linux/bitops.h>
-#include <linux/delay.h>
-#include <linux/err.h>
+#include <clk.h>
+#include <dma.h>
+#include <log.h>
 #include <malloc.h>
 #include <miiphy.h>
 #include <net.h>
-#include <dm/of_access.h>
-#include <dm/ofnode.h>
-#include <linux/iopoll.h>
-#include <linux/sizes.h>
-#include <asm/dma-mapping.h>
+#include <reset.h>
 #include <wait_bit.h>
-
+#include <asm/io.h>
+#include <dm/device_compat.h>
+#include <linux/delay.h>
+#include <linux/printk.h>
 /* Register definitions derived from Linux source */
 #define SYS_REV_CTRL			0x00
 
@@ -63,7 +43,7 @@
 #define UMAC_MAX_FRAME_LEN		(GENET_UMAC_OFF + 0x014)
 #define UMAC_MAC0			(GENET_UMAC_OFF + 0x00c)
 #define UMAC_MAC1			(GENET_UMAC_OFF + 0x010)
-#define UMAC_CMD			(GENET_UMAC_OFF + 0x008)
+#define UMAC_CMD			(GENET_UMAC_OFF + 0x008)   // control register used t on/off TX/RX, MAC speed, reset MAC, loopback,...
 #define MDIO_CMD			(GENET_UMAC_OFF + 0x614)
 #define UMAC_TX_FLUSH			(GENET_UMAC_OFF + 0x334)
 #define MDIO_START_BUSY			BIT(29)
@@ -181,6 +161,11 @@
 #define RX_TOTAL_BUFSIZE		(RX_BUF_LENGTH * RX_DESCS)
 #define RX_BUF_OFFSET			2
 
+/* =========================================================
+ * 1. Private data
+ * =========================================================
+ */
+
 struct bcmgenet_eth_priv {
 	char rxbuffer[RX_TOTAL_BUFSIZE] __aligned(ARCH_DMA_MINALIGN);
 	void *mac_reg;
@@ -196,33 +181,253 @@ struct bcmgenet_eth_priv {
 	struct mii_dev *bus;
 };
 
-static void bcmgenet_umac_reset(struct bcmgenet_eth_priv *priv)
+static int bcmgenet_interface_set(struct bcmgenet_eth_priv *priv) {
+	switch (priv->interface)
+	{
+	case PHY_INTERFACE_MODE_RGMII:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
+		writel(PORT_MODE_EXT_GPHY, priv->mac_reg + SYS_PORT_CTRL);
+		break;
+	default:
+		printf("unknown phy mode: %d\n", priv->interface);
+		break;
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+// Start MDIO transaction
+static void bcmgenet_mdio_start(struct bcmgenet_eth_priv *priv)
 {
 	u32 reg;
 
-	reg = readl(priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
-	reg |= BIT(1);
-	writel(reg, (priv->mac_reg + SYS_RBUF_FLUSH_CTRL));
+	reg = readl_relaxed (priv->mac_reg + MDIO_CMD);
+	reg |= MDIO_START_BUSY;
+	writel_relaxed (reg, priv->mac_reg + MDIO_CMD);
+	// setbits_32(priv->mac_reg + MDIO_CMD, MDIO_START_BUSY);
+}
+
+// Read value in a PHY register via MDIO
+static int bcmgenet_mdio_read (struct mii_dev *bus, int phy_id, int devad, int reg) {
+	struct udevice *dev = bus->priv;
+	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
+	u32 val;
+	int ret;
+
+/*
+Reading value in PHY register flow:
+- create cmd for reading : MDIO_RD | (phy_id << MDIO_PMD_SHIFT) | (reg << MDIO_REG_SHIFT);
+- send cmd by writel_relaxed
+- wait for reading
+- read data in register MDIO_CMD
+- take 16bit lower
+*/
+
+	val = MDIO_RD | (phy_id << MDIO_PMD_SHIFT) | (reg << MDIO_REG_SHIFT);
+	writel_relaxed (val, priv->mac_reg + MDIO_CMD);
+
+	bcmgenet_mdio_start(priv);
+	ret = wait_for_bit_32(priv->mac_reg + MDIO_CMD,
+			      MDIO_START_BUSY, false, 20, true);
+	if (ret)
+		return ret;
+
+	val = readl_relaxed (priv->mac_reg + MDIO_CMD);
+
+	return (val & 0xffff);
+}
+
+static int bcmgenet_mdio_write (struct mii_dev *bus, int phy_id, int deval, int reg, u16 data) {
+	struct udevice *dev = bus->priv;
+	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
+	u32 cmd;
+
+	cmd = MDIO_WR | (phy_id << MDIO_PMD_SHIFT) |
+		(reg << MDIO_REG_SHIFT) | (0xffff & data);
+
+	writel_relaxed (cmd, priv->mac_reg + MDIO_CMD);
+
+	bcmgenet_mdio_start(priv);
+
+	return wait_for_bit_32(priv->mac_reg + MDIO_CMD,
+			       MDIO_START_BUSY, false, 20, true);
+}
+
+static int bcmgenet_mdio_init(const char *name, struct udevice *priv) {
+	struct mii_dev *bus;
+	bus = mdio_alloc();
+	if (!bus) {
+		debug("Failed to allocate MDIO bus\n");
+		return -ENOMEM;
+	}
+
+	snprintf(bus->name, sizeof(bus->name), name);
+	bus->priv = (void *)priv;
+	bus->write = bcmgenet_mdio_write;
+	bus->read = bcmgenet_mdio_read;
+	snprintf (bus->name, sizeof (bus->name), name);
+
+	return mdio_register(bus);
+}
+
+static int bcmgenet_phy_init (struct bcmgenet_eth_priv *priv, void *dev) {
+	struct phy_device *phydev;
+	int ret;
+	
+	phydev = phy_connect(priv->bus, priv->phyaddr, dev, priv->interface);
+	if (!phydev) {
+		return -ENODEV;
+	}
+
+	phydev->supported &= PHY_GBIT_FEATURES; // Giữ lại trong phydev->supported chỉ những feature nằm trong tập PHY_GBIT_FEATURES.
+	if (priv->speed) {
+		ret = phy_set_supported(priv->phydev, priv->speed);
+		if (ret)
+			return ret;
+	}
+	phydev->advertising = phydev->supported;
+	priv->phydev = phydev;
+
+	phy_config(priv->phydev);
+
+	return 0;
+}
+
+static int bcmgenet_eth_of_to_plat(struct udevice *dev) {
+	struct eth_pdata *pdata = dev_get_plat(dev);
+	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
+	struct ofnode_phandle_args phy_node;
+	int ret;
+
+	pdata->iobase = dev_read_addr(dev); // đọc địa chỉ từ reg
+
+	pdata->phy_interface = dev_read_phy_mode(dev); // đọc phy mode
+	if (pdata->phy_interface == PHY_INTERFACE_MODE_NA)
+		return -EINVAL;
+
+	ret = dev_read_phandle_with_args(dev, "phy-handle", NULL, 0, 0,
+					 &phy_node);  // tìm phy-handle --> phy_node = phy1
+	if (!ret) {
+		ofnode_read_s32(phy_node.node, "reg", &priv->phyaddr); // lấy ra reg của phy1
+		ofnode_read_s32(phy_node.node, "max-speed", &pdata->max_speed);   // lấy ra max speed của phy1
+	}	
+
+	return 0;
+}
+
+/* =========================================================
+ * 2. Probe
+ * =========================================================
+ */
+
+static int bcmgenet_tnt_probe(struct udevice *dev)
+{
+	struct eth_pdata *pdata = dev_get_plat(dev);
+	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
+
+	ofnode mdio_node;
+	const char *name;
+	u32 reg;
+	int ret;
+	u8 major;
+	
+	priv->mac_reg = map_physmem (pdata->iobase, SZ_64K, MAP_NOCACHE);
+	priv->interface = pdata->phy_interface;
+	priv->speed = pdata->max_speed;
+
+	/* Read GENET HW version */
+	reg = readl_relaxed(priv->mac_reg + SYS_REV_CTRL);
+	major = (reg >> 24 & 0x0f);
+	if (major == 6)
+		major = 5;
+	else if (major == 5)
+		major = 4;
+	else if (major == 0)
+		major = 1;
+	else {
+		printf("Unsupported GENETv%d.%d\n", major, (reg >> 16) & 0x0f);
+		return -ENODEV;
+	}
+
+	ret = bcmgenet_interface_set (priv);
+	if (ret) {
+		return ret;
+	}
+
+	writel (0, priv->mac_reg + SYS_RBUF_FLUSH_CTRL); // clear Receiver buffer in GENET MAC
 	udelay(10);
 
+	/* disable MAC while updating its registers */
+	writel(0, priv->mac_reg + UMAC_CMD); // Disable TX và RX của MAC.
+	/* issue soft reset with (rg)mii loopback to ensure a stable rxclk */
+	writel(CMD_SW_RESET | CMD_LCL_LOOP_EN, priv->mac_reg + UMAC_CMD);
+
+	mdio_node = dev_read_first_subnode(dev);
+	name = ofnode_get_name(mdio_node);
+
+	ret = bcmgenet_mdio_init (name, dev);
+	if (ret) {
+		return ret;
+	}
+
+	priv->bus = miiphy_get_dev_by_name(name); // tìm một MDIO/MII bus đã được đăng ký trong U-Boot theo tên name (qua hàm bcmgenet_mdio_init), rồi lưu con trỏ tới bus đó vào priv->bus.
+    // Bây h, priv->bus chính là mii_dev được đăng ký trong hàm bcmgenet_mdio_init
+	
+	return bcmgenet_phy_init(priv, dev);
+}
+
+/* =========================================================
+ * 3. Remove
+ * =========================================================
+ */
+
+static int my_remove(struct udevice *dev)
+{
+    printf("my_remove()\n");
+
+    return 0;
+}
+
+/* =========================================================
+ * 4. Operations (optional)
+ * =========================================================
+ */
+
+// reset , set UMAC and Genet in default state
+static void bcmgenet_umac_reset(struct bcmgenet_eth_priv *priv) {
+	u32 reg;
+
+	// Flush RX buffer
+	reg = readl (priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
+	reg |= BIT(1); // reg |= ( 1UL << 1 )
+	writel(reg, priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
+	udelay(10);
+
+	// clear bits flush
 	reg &= ~BIT(1);
-	writel(reg, (priv->mac_reg + SYS_RBUF_FLUSH_CTRL));
+	writel(reg, priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
 	udelay(10);
 
-	writel(0, (priv->mac_reg + SYS_RBUF_FLUSH_CTRL));
+	// write 0 to full register
+	writel(0, priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
 	udelay(10);
 
+	// Disable MAC - TX/RX Disable 
 	writel(0, priv->mac_reg + UMAC_CMD);
 
-	writel(CMD_SW_RESET | CMD_LCL_LOOP_EN, priv->mac_reg + UMAC_CMD);
+	// Soft reset UMAC
+	writel(CMD_SW_RESET | CMD_LCL_LOOP_EN,
+       priv->mac_reg + UMAC_CMD);
 	udelay(2);
 	writel(0, priv->mac_reg + UMAC_CMD);
 
-	/* clear tx/rx counter */
+	/* Clear MIB counters- - Management Information Base */
 	writel(MIB_RESET_RX | MIB_RESET_TX | MIB_RESET_RUNT,
-	       priv->mac_reg + UMAC_MIB_CTRL);
-	writel(0, priv->mac_reg + UMAC_MIB_CTRL);
+       priv->mac_reg + UMAC_MIB_CTRL);
+	writel(0, priv->mac_reg + UMAC_MIB_CTRL); // clear reset bit
 
+	// Set maximum Ethernet frame length
 	writel(ENET_MAX_MTU_SIZE, priv->mac_reg + UMAC_MAX_FRAME_LEN);
 
 	/* init rx registers, enable ip header optimization */
@@ -233,12 +438,20 @@ static void bcmgenet_umac_reset(struct bcmgenet_eth_priv *priv)
 	writel(1, (priv->mac_reg + RBUF_TBUF_SIZE_CTRL));
 }
 
-static int bcmgenet_gmac_write_hwaddr(struct udevice *dev)
-{
+// ghi MAC address của card Ethernet vào các thanh ghi phần cứng của GENET MAC.
+static int bcmgenet_gmac_write_hwaddr(struct udevice *dev) {
 	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
 	struct eth_pdata *pdata = dev_get_plat(dev);
-	uchar *addr = pdata->enetaddr;
+	uchar *addr = pdata->enetaddr; // get MAC address of ethernet card
 	u32 reg;
+/*
+genet co 2 thanh ghi de chua MAC address la UMAC_MAC0 vs UMAC_MAC1
+tong cong can chua 48bit = 6 byte
+
+Nhung moi register co 32bit nen chia MAC thanh
+MAC0 -> 4byte dau
+MAc1-> 2 byte sau
+*/
 
 	reg = addr[0] << 24 | addr[1] << 16 | addr[2] << 8 | addr[3];
 	writel_relaxed(reg, priv->mac_reg + UMAC_MAC0);
@@ -249,6 +462,7 @@ static int bcmgenet_gmac_write_hwaddr(struct udevice *dev)
 	return 0;
 }
 
+// Disable DMA of TX/RX and confirm all data in TZ queue will be flush clearly 
 static void bcmgenet_disable_dma(struct bcmgenet_eth_priv *priv)
 {
 	clrbits_32(priv->mac_reg + TDMA_REG_BASE + DMA_CTRL, DMA_EN);
@@ -259,6 +473,7 @@ static void bcmgenet_disable_dma(struct bcmgenet_eth_priv *priv)
 	writel(0, priv->mac_reg + UMAC_TX_FLUSH);
 }
 
+// Enable TX/RX DMA 
 static void bcmgenet_enable_dma(struct bcmgenet_eth_priv *priv)
 {
 	u32 dma_ctrl = (1 << (DEFAULT_Q + DMA_RING_BUF_EN_SHIFT)) | DMA_EN;
@@ -268,33 +483,44 @@ static void bcmgenet_enable_dma(struct bcmgenet_eth_priv *priv)
 	setbits_32(priv->mac_reg + RDMA_REG_BASE + DMA_CTRL, dma_ctrl);
 }
 
-static int bcmgenet_gmac_eth_send(struct udevice *dev, void *packet, int length)
-{
+// prepare DMA TX descriptor , thong bao den RAM
+static int bcmgenet_gmac_eth_send(struct udevice *dev, void *packet, int length) {
 	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
+	// TX descriptor address
 	void *desc_base = priv->tx_desc_base + priv->tx_index * DMA_DESC_SIZE;
-	u32 len_stat = length << DMA_BUFLENGTH_SHIFT;
+	u32 len_stat = length << DMA_BUFLENGTH_SHIFT; // create length field
 	ulong packet_aligned = rounddown((ulong)packet, ARCH_DMA_MINALIGN);
 	u32 prod_index, cons;
 	u32 tries = 100;
 
-	prod_index = readl(priv->mac_reg + TDMA_PROD_INDEX);
+	prod_index = readl(priv->mac_reg + TDMA_PROD_INDEX); // get producer index
 
-	/* There is actually no reason for the rounding here, but the ARMv7
-	 * implementation of flush_dcache_range() checks for aligned
-	 * boundaries of the flushed range.
-	 * Adjust them here to pass that check and avoid misleading messages.
-	 */
 	flush_dcache_range(packet_aligned,
-			   packet_aligned + roundup(length, ARCH_DMA_MINALIGN));
+			   packet_aligned + roundup(length, ARCH_DMA_MINALIGN)); // đảm bảo dữ liệu packet từ cache được ghi xuống RAM trước khi DMA đọc.
 
 	len_stat |= 0x3F << DMA_TX_QTAG_SHIFT;
 	len_stat |= DMA_TX_APPEND_CRC | DMA_SOP | DMA_EOP;
 
 	/* Set-up packet for transmission */
-	writel(lower_32_bits((ulong)packet), (desc_base + DMA_DESC_ADDRESS_LO));
-	writel(upper_32_bits((ulong)packet), (desc_base + DMA_DESC_ADDRESS_HI));
-	writel(len_stat, (desc_base + DMA_DESC_LENGTH_STATUS));
+	writel(lower_32_bits((ulong)packet), (desc_base + DMA_DESC_ADDRESS_LO)); // write 32 low bit packet to descriptor
+	writel(upper_32_bits((ulong)packet), (desc_base + DMA_DESC_ADDRESS_HI)); // write 32 high bit packet to descriptor
+	writel(len_stat, (desc_base + DMA_DESC_LENGTH_STATUS));	
 
+// Finish setup TX descriptor
+/*
+TX Descriptor
+┌─────────────────────────────┐
+│ LENGTH                      │
+│ SOP                         │
+│ EOP                         │
+│ APPEND_CRC                  │
+│ QTAG                        │
+├─────────────────────────────┤
+│ ADDRESS_LO                  │
+├─────────────────────────────┤
+│ ADDRESS_HI                  │
+└─────────────────────────────┘
+*/
 	/* Increment index and start transmission */
 	if (++priv->tx_index >= TX_DESCS)
 		priv->tx_index = 0;
@@ -302,8 +528,9 @@ static int bcmgenet_gmac_eth_send(struct udevice *dev, void *packet, int length)
 	prod_index++;
 
 	/* Start Transmisson */
-	writel(prod_index, priv->mac_reg + TDMA_PROD_INDEX);
+	writel(prod_index, priv->mac_reg + TDMA_PROD_INDEX); // Notify to DMA
 
+    // Wait DMA for finisj work
 	do {
 		cons = readl(priv->mac_reg + TDMA_CONS_INDEX);
 	} while ((cons & 0xffff) < prod_index && --tries);
@@ -312,6 +539,7 @@ static int bcmgenet_gmac_eth_send(struct udevice *dev, void *packet, int length)
 
 	return 0;
 }
+
 
 /* Check whether all cache lines affected by an invalidate are within
  * the buffer, to make sure we don't accidentally lose unrelated dirty
@@ -338,43 +566,79 @@ static int bcmgenet_gmac_eth_recv(struct udevice *dev,
 	u32 prod_index = readl(priv->mac_reg + RDMA_PROD_INDEX);
 	u32 length, addr;
 
-	if (prod_index == priv->c_index)
+	if (prod_index == priv->c_index) // check if have any new packet
 		return -EAGAIN;
 
 	length = readl(desc_base + DMA_DESC_LENGTH_STATUS);
 	length = (length >> DMA_BUFLENGTH_SHIFT) & DMA_BUFLENGTH_MASK;
-	addr = readl(desc_base + DMA_DESC_ADDRESS_LO);
+/*
+for ex:
+ DMA_DESC_LENGTH_STATUS reg
+register
+┌───────────────────────┬───────────────┐
+│      LENGTH           │    STATUS     │
+└───────────────────────┴───────────────┘
+          ↑
+       shift 16
 
+*/	
+
+	addr = readl(desc_base + DMA_DESC_ADDRESS_LO); // get packet address in RAM that DMA had written
 	invalidate_dcache_check(addr, length, RX_BUF_LENGTH);
 
-	/* To cater for the IP header alignment the hardware does.
-	 * This would actually not be needed if we don't program
-	 * RBUF_ALIGN_2B
-	 */
 	*packetp = (uchar *)(ulong)addr + RX_BUF_OFFSET;
+/*
+RX buffer trong RAM
 
-	return length - RX_BUF_OFFSET;
+0x82000000
+     │
+     ├── n RX_BUF_OFFSET
+     │
+0x8200000n
+     │
+     ▼
+┌─────────────────────────┐
+│ Ethernet packet         │
+│ Dest MAC                │
+│ Src MAC                 │
+│ EtherType               │
+│ Payload                 │
+│ FCS ...                 │
+└─────────────────────────┘
+*/
+
+	return length;
 }
 
+// Đây là hàm hoàn tất việc xử lý một RX packet
 static int bcmgenet_gmac_free_pkt(struct udevice *dev, uchar *packet,
 				  int length)
 {
 	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
 	void *desc_base = priv->rx_desc_base + priv->rx_index * DMA_DESC_SIZE;
-	u32 addr = readl(desc_base + DMA_DESC_ADDRESS_LO);
+	u32 addr = readl(desc_base + DMA_DESC_ADDRESS_LO); // // get packet address in RAM that DMA had written
 
 	flush_dcache_range(addr, addr + RX_BUF_LENGTH);
+/*
+c_index and prod_index
+- c_index = CPU đã tiêu thụ packet đến đâu. ( CPU xu ly xong descriptor nao r )
+- prod_index = DMA đã sản xuất packet đến đâu.
+VD: Ban dau, ca 2 index = 2
+Sau do, DMA nhan them 3 package, --> prod_index = 2+3=5
+tai day, c_index dang bang 2, co 3 packet dang cho xu ly, moi lan goi recv xong thi c_index + 1
+*/
 
 	/* Tell the MAC we have consumed that last receive buffer. */
 	priv->c_index = (priv->c_index + 1) & 0xFFFF;
-	writel(priv->c_index, priv->mac_reg + RDMA_CONS_INDEX);
+	writel(priv->c_index, priv->mac_reg + RDMA_CONS_INDEX); // Notify to DMA that this packet done
 
-	/* Forward our descriptor pointer, wrapping around if needed. */
+/* Forward our descriptor pointer, wrapping around if needed. */
 	if (++priv->rx_index >= RX_DESCS)
 		priv->rx_index = 0;
 
 	return 0;
 }
+
 
 static void rx_descs_init(struct bcmgenet_eth_priv *priv)
 {
@@ -438,12 +702,17 @@ static void tx_ring_init(struct bcmgenet_eth_priv *priv)
 	writel(1 << DEFAULT_Q, priv->mac_reg + TDMA_REG_BASE + DMA_RING_CFG);
 }
 
-static int bcmgenet_adjust_link(struct bcmgenet_eth_priv *priv)
-{
-	struct phy_device *phy_dev = priv->phydev;
+/*
+hàm đồng bộ cấu hình MAC GENET theo trạng thái thực tế của PHY.
+
+PHY đã xác định được link đang chạy ở tốc độ nào + interface gì, 
+ -> bcmgenet_adjust_link() lấy thông tin đó và cấu hình lại MAC GENET cho khớp.
+*/
+static int bcmgenet_adjust_link(struct bcmgenet_eth_priv *priv) {
+	struct phy_device *phydev = priv->phydev;
 	u32 speed;
 
-	switch (phy_dev->speed) {
+	switch (phydev->speed) {
 	case SPEED_1000:
 		speed = UMAC_SPEED_1000;
 		break;
@@ -454,33 +723,35 @@ static int bcmgenet_adjust_link(struct bcmgenet_eth_priv *priv)
 		speed = UMAC_SPEED_10;
 		break;
 	default:
-		printf("bcmgenet: Unsupported PHY speed: %d\n", phy_dev->speed);
+		printf("bcmgenet: Unsupported PHY speed: %d\n", phydev->speed);
 		return -EINVAL;
 	}
 
-	clrsetbits_32(priv->mac_reg + EXT_RGMII_OOB_CTRL, OOB_DISABLE,
-			RGMII_LINK | RGMII_MODE_EN);
+	clrsetbits_32(priv->mac_reg + EXT_RGMII_OOB_CTRL, OOB_DISABLE, RGMII_LINK | RGMII_MODE_EN);
 
-	if (phy_dev->interface == PHY_INTERFACE_MODE_RGMII ||
-	    phy_dev->interface == PHY_INTERFACE_MODE_RGMII_RXID)
-		setbits_32(priv->mac_reg + EXT_RGMII_OOB_CTRL, ID_MODE_DIS);
 
+	if (phydev->interface == PHY_INTERFACE_MODE_RGMII ||
+	    phydev->interface == PHY_INTERFACE_MODE_RGMII_RXID)
+		setbits_32(priv->mac_reg + EXT_RGMII_OOB_CTRL, ID_MODE_DIS); // set bit ID_MODE_DIS of register to 1
+	
 	writel(speed << CMD_SPEED_SHIFT, (priv->mac_reg + UMAC_CMD));
-
+	
 	return 0;
 }
 
-static int bcmgenet_gmac_eth_start(struct udevice *dev)
-{
+
+/* Start ethernet genet
+*/
+static int bcmgenet_gmac_eth_start(struct udevice *dev) {
 	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
 	int ret;
-
+	
 	priv->tx_desc_base = priv->mac_reg + GENET_TX_OFF;
 	priv->rx_desc_base = priv->mac_reg + GENET_RX_OFF;
 
 	bcmgenet_umac_reset(priv);
-
 	bcmgenet_gmac_write_hwaddr(dev);
+
 
 	/* Disable RX/TX DMA and flush TX queues */
 	bcmgenet_disable_dma(priv);
@@ -493,6 +764,7 @@ static int bcmgenet_gmac_eth_start(struct udevice *dev)
 	/* Enable RX/TX DMA */
 	bcmgenet_enable_dma(priv);
 
+
 	/* read PHY properties over the wire from generic PHY set-up */
 	ret = phy_startup(priv->phydev);
 	if (ret) {
@@ -500,7 +772,7 @@ static int bcmgenet_gmac_eth_start(struct udevice *dev)
 		return ret;
 	}
 
-	/* Update MAC registers based on PHY property */
+    /* Update/Sync MAC followed PHY */
 	ret = bcmgenet_adjust_link(priv);
 	if (ret) {
 		printf("bcmgenet: adjust PHY link failed: %d\n", ret);
@@ -513,162 +785,6 @@ static int bcmgenet_gmac_eth_start(struct udevice *dev)
 	return 0;
 }
 
-static int bcmgenet_phy_init(struct bcmgenet_eth_priv *priv, void *dev)
-{
-	struct phy_device *phydev;
-	int ret;
-
-	phydev = phy_connect(priv->bus, priv->phyaddr, dev, priv->interface);
-	if (!phydev)
-		return -ENODEV;
-
-	phydev->supported &= PHY_GBIT_FEATURES;
-	if (priv->speed) {
-		ret = phy_set_supported(priv->phydev, priv->speed);
-		if (ret)
-			return ret;
-	}
-	phydev->advertising = phydev->supported;
-
-	priv->phydev = phydev;
-	phy_config(priv->phydev);
-
-	return 0;
-}
-
-static void bcmgenet_mdio_start(struct bcmgenet_eth_priv *priv)
-{
-	setbits_32(priv->mac_reg + MDIO_CMD, MDIO_START_BUSY);
-}
-
-static int bcmgenet_mdio_write(struct mii_dev *bus, int addr, int devad,
-			       int reg, u16 value)
-{
-	struct udevice *dev = bus->priv;
-	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
-	u32 val;
-
-	/* Prepare the read operation */
-	val = MDIO_WR | (addr << MDIO_PMD_SHIFT) |
-		(reg << MDIO_REG_SHIFT) | (0xffff & value);
-	writel_relaxed(val,  priv->mac_reg + MDIO_CMD);
-
-	/* Start MDIO transaction */
-	bcmgenet_mdio_start(priv);
-
-	return wait_for_bit_32(priv->mac_reg + MDIO_CMD,
-			       MDIO_START_BUSY, false, 20, true);
-}
-
-static int bcmgenet_mdio_read(struct mii_dev *bus, int addr, int devad, int reg)
-{
-	struct udevice *dev = bus->priv;
-	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
-	u32 val;
-	int ret;
-
-	/* Prepare the read operation */
-	val = MDIO_RD | (addr << MDIO_PMD_SHIFT) | (reg << MDIO_REG_SHIFT);
-	writel_relaxed(val, priv->mac_reg + MDIO_CMD);
-
-	/* Start MDIO transaction */
-	bcmgenet_mdio_start(priv);
-
-	ret = wait_for_bit_32(priv->mac_reg + MDIO_CMD,
-			      MDIO_START_BUSY, false, 20, true);
-	if (ret)
-		return ret;
-
-	val = readl_relaxed(priv->mac_reg + MDIO_CMD);
-
-	return val & 0xffff;
-}
-
-static int bcmgenet_mdio_init(const char *name, struct udevice *priv)
-{
-	struct mii_dev *bus = mdio_alloc();
-
-	if (!bus) {
-		debug("Failed to allocate MDIO bus\n");
-		return -ENOMEM;
-	}
-
-	bus->read = bcmgenet_mdio_read;
-	bus->write = bcmgenet_mdio_write;
-	snprintf(bus->name, sizeof(bus->name), name);
-	bus->priv = (void *)priv;
-
-	return mdio_register(bus);
-}
-
-/* We only support RGMII (as used on the RPi4). */
-static int bcmgenet_interface_set(struct bcmgenet_eth_priv *priv)
-{
-	phy_interface_t phy_mode = priv->interface;
-
-	switch (phy_mode) {
-	case PHY_INTERFACE_MODE_RGMII:
-	case PHY_INTERFACE_MODE_RGMII_RXID:
-		writel(PORT_MODE_EXT_GPHY, priv->mac_reg + SYS_PORT_CTRL);
-		break;
-	default:
-		printf("unknown phy mode: %d\n", priv->interface);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static int bcmgenet_eth_probe(struct udevice *dev)
-{
-	struct eth_pdata *pdata = dev_get_plat(dev);
-	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
-	ofnode mdio_node;
-	const char *name;
-	u32 reg;
-	int ret;
-	u8 major;
-
-	priv->mac_reg = map_physmem(pdata->iobase, SZ_64K, MAP_NOCACHE);
-	priv->interface = pdata->phy_interface;
-	priv->speed = pdata->max_speed;
-
-	/* Read GENET HW version */
-	reg = readl_relaxed(priv->mac_reg + SYS_REV_CTRL);
-	major = (reg >> 24) & 0x0f;
-	if (major != 6) {
-		if (major == 5)
-			major = 4;
-		else if (major == 0)
-			major = 1;
-
-		printf("Unsupported GENETv%d.%d\n", major, (reg >> 16) & 0x0f);
-		return -ENODEV;
-	}
-
-	ret = bcmgenet_interface_set(priv);
-	if (ret)
-		return ret;
-
-	writel(0, priv->mac_reg + SYS_RBUF_FLUSH_CTRL);
-	udelay(10);
-	/* disable MAC while updating its registers */
-	writel(0, priv->mac_reg + UMAC_CMD);
-	/* issue soft reset with (rg)mii loopback to ensure a stable rxclk */
-	writel(CMD_SW_RESET | CMD_LCL_LOOP_EN, priv->mac_reg + UMAC_CMD);
-
-	mdio_node = dev_read_first_subnode(dev);
-	name = ofnode_get_name(mdio_node);
-
-	ret = bcmgenet_mdio_init(name, dev);
-	if (ret)
-		return ret;
-
-	priv->bus = miiphy_get_dev_by_name(name);
-
-	return bcmgenet_phy_init(priv, dev);
-}
-
 static void bcmgenet_gmac_eth_stop(struct udevice *dev)
 {
 	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
@@ -678,7 +794,7 @@ static void bcmgenet_gmac_eth_stop(struct udevice *dev)
 	bcmgenet_disable_dma(priv);
 }
 
-static const struct eth_ops bcmgenet_gmac_eth_ops = {
+static const struct eth_ops bcmgenet_gmac_eth_ops_tnt = {
 	.start                  = bcmgenet_gmac_eth_start,
 	.write_hwaddr           = bcmgenet_gmac_write_hwaddr,
 	.send                   = bcmgenet_gmac_eth_send,
@@ -687,47 +803,28 @@ static const struct eth_ops bcmgenet_gmac_eth_ops = {
 	.stop                   = bcmgenet_gmac_eth_stop,
 };
 
-static int bcmgenet_eth_of_to_plat(struct udevice *dev)
-{
-	struct eth_pdata *pdata = dev_get_plat(dev);
-	struct bcmgenet_eth_priv *priv = dev_get_priv(dev);
-	struct ofnode_phandle_args phy_node;
-	int ret;
-
-	pdata->iobase = dev_read_addr(dev);
-
-	/* Get phy mode from DT */
-	pdata->phy_interface = dev_read_phy_mode(dev);
-	if (pdata->phy_interface == PHY_INTERFACE_MODE_NA)
-		return -EINVAL;
-
-	ret = dev_read_phandle_with_args(dev, "phy-handle", NULL, 0, 0,
-					 &phy_node);
-	if (!ret) {
-		ofnode_read_s32(phy_node.node, "reg", &priv->phyaddr);
-		ofnode_read_s32(phy_node.node, "max-speed", &pdata->max_speed);
-	}
-
-	return 0;
-}
-
-/* The BCM2711 implementation has a limited burst length compared to a generic
- * GENETv5 version, but we go with that shorter value (8) in both cases, for
- * the sake of simplicity.
+/* =========================================================
+ * 5. Device Tree match table
+ * =========================================================
  */
-static const struct udevice_id bcmgenet_eth_ids[] = {
-	{.compatible = "brcm,genet-v5"},
-	{.compatible = "brcm,bcm2711-genet-v5"},
-	{}
+
+static const struct udevice_id bcmgenet_tnt_ids[] = {
+    { .compatible = "brcm,bcm2711-genet-v5-tnt" },
+    { }
 };
 
-U_BOOT_DRIVER(eth_bcmgenet) = {
-	.name   = "eth_bcmgenet",
-	.id     = UCLASS_ETH,
-	.of_match = bcmgenet_eth_ids,
+/* =========================================================
+ * 6. Register driver
+ * =========================================================
+ */
+
+U_BOOT_DRIVER(bcmgenet_tnt) = { // tên symbol trong source C. Dat tuy y
+    .name       = "bcmgenet_tnt", // tên driver trong Driver Model. Dat tuy y
+    .id         = UCLASS_ETH, // list ID xem tai include/dm/uclass-id.h
+    .of_match   = bcmgenet_tnt_ids,
 	.of_to_plat = bcmgenet_eth_of_to_plat,
-	.probe  = bcmgenet_eth_probe,
-	.ops    = &bcmgenet_gmac_eth_ops,
+    .probe      = bcmgenet_tnt_probe,
+    .ops        = &bcmgenet_gmac_eth_ops_tnt,
 	.priv_auto	= sizeof(struct bcmgenet_eth_priv),
 	.plat_auto	= sizeof(struct eth_pdata),
 	.flags = DM_FLAG_ALLOC_PRIV_DMA,

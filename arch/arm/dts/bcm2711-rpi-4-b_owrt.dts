@@ -208,19 +208,6 @@
 	status = "okay";
 };
 
-&genet {
-	phy-handle = <&phy1>;
-	phy-mode = "rgmii-rxid";
-	status = "okay";
-};
-
-&genet_mdio {
-	phy1: ethernet-phy@1 {
-		/* No PHY interrupt */
-		reg = <0x1>;
-	};
-};
-
 &pcie0 {
 	pci@0,0 {
 		device_type = "pci";
@@ -297,3 +284,36 @@
 		status = "okay";
 	};
 };
+
+&{/scb} {
+	genet: ethernet_tt@7d580000 {
+		compatible = "brcm,bcm2711-genet-v5-tnt";
+		reg = <0x0 0x7d580000 0x10000>;
+   		#address-cells = <0x1>;
+   		#size-cells = <0x1>;
+		interrupts = <0 157 4>,
+         			 <0 158 4>;
+		status = "disabled";
+
+		genet_mdio: mdio@e14 {
+			compatible = "brcm,genet-mdio-v5-tnt";
+   			#address-cells = <0x1>;
+   			#size-cells = <0x0>;			
+			reg = <0xe14 0x8>;     // MDIO regiser ben trong genet
+		};
+	};
+};
+
+&genet_mdio {                // MDIO bus
+	phy1: ethernet-phy@1 {    // This node is located in MDIO bus genet_mdio
+		reg = <0x1>;
+		led-modes = <0x00 0x08>;
+	};
+};
+
+&genet {
+	phy-handle = <&phy1>;      // Driver genet MAC will use this phy 
+	phy-mode = "rgmii-rxid";
+	status = "okay";
+};
+

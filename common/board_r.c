@@ -571,6 +571,7 @@ static int run_main_loop(void)
 {
 	int ret;
 
+
 #ifdef CONFIG_SANDBOX
 	sandbox_main_loop_init();
 #endif
